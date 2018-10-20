@@ -1,0 +1,150 @@
+/*
+ *	RSHD.C -- Phil Budne @ BostonU / Distributed Systems
+ *	BSD Un*x style remote shell daemon for Twenex
+ *
+ *	(c) 1986 Boston University.
+ *	Permission granted to copy for non-profit use.
+ *
+ *	Written using UTAH PCC-20. Link with RSHLIB.
+ *
+ *	Scenario:
+ *	Wait for connection, then spawn a new job loaded with RSHSRV,
+ *	NLI with the CJ%LWP (BU -- login without password).
+ */
+
+# include "pcc:stdio.h"
+# include "pcc:tops20.h"
+# include "pcc:mon_files.h"
+# include "pcc:mon_fork.h"
+# include "mon_crjob.h"
+
+main() {
+    int jfn;
+
+    epcap(FHslf,-1);			/* wheel up */
+
+    for( ; ; ) {
+	jfn = srvjfn();			/* wait for connect */
+	if( jfn < 0 ) {
+	    perror("could not get jfn");
+	    exit(1);
+	} /* could not open server */
+	worker(jfn);
+    } /* forever */
+} /* main */
+
+worker(jfn)
+int jfn;
+{
+    char foreign[30];
+    int host, sock;
+
+    if( (sock = get_fsock(jfn)) > 1023 || (host = get_fhost(jfn)) < 0 ||
+      hostname(foreign, host) < 0 )
+	return( punt(jfn,"Permission denied.") );
+
+    printf("RSHD: contact from %s, port %d\n", foreign, sock);
+    if( makjob(jfn, "SYSTEM:RSHSRV.EXE") < 0 )
+	printf("could not create job");
+
+} /* worker */
+
+/*
+ *	jfn	jfn of TCP: connection
+ *	prog	name of .EXE file or NULL
+ */
+
+int makjob(jfn, prog)
+char *prog;
+int jfn;
+{
+    int tvt, job;
+    int crjblk[015], acs[5];
+    register int i;
+
+    for( i = 0; i < sizeof( crjblk ); i++ )
+	crjblk[i] = 0;
+
+    /* wait 'till attached, load file, give my caps, login w/o password */
+    ac1 = Value(CJ_wta) | Value(CJ_fil) | Value(CJ_cap) | Value(CJ_lwp);
+    ac2 = (int) crjblk;
+
+    crjblk[CJfil] = POINT(prog);	/* BP to program to load */
+    crjblk[CJtty] = NUlio;		/* new job is detached */
+
+    if( JSYS(JScrjob,acs) == JSerr )
+	return( punt(jfn, "Could not create job") );
+    job = ac1;				/* save job number */
+
+    tvt = maktvt(jfn);			/* convert jfn to tvt */
+    if( tvt < 0 ) {
+	logout(job);			/* could not create TVT, kill job */
+	return( punt(jfn, "Could not create net virtual terminal") );
+    } /* maktvt failed */
+
+    ac1 = job | (0100000 << 18);	/* AT%TRM */
+    ac2 = 0;
+    ac3 = 0;
+    ac4 = tvt;
+    if( JSYS(JSatach,acs) == JSerr ) {	/* attach job to terminal */
+	ac1 = job;			/* failed!! */
+	JSYS(JSlgout,acs);		/* blast job */
+	return( -1 );			/* no way to send error text!! */
+    } /* atach failed */
+    return( job );
+} /* makjob */
+
+int maktvt(jfn)
+int jfn;
+{
+    int nvtdes, acs[5];
+
+    acs[1] = jfn;
+    if( JSYS(JSatnvt,acs) == JSerr )
+	return( -1 );
+
+    nvtdes = acs[1];
+    if( JSYS(JSrfmod,acs) == JSerr )
+	return( nvtdes );
+    acs[2] |= 040000<<18;		/* set TT%LCA */
+    JSYS(JSstpar,acs);
+
+    acs[1] = nvtdes;
+    acs[2] = 031;		/* .MOSLW - set width */
+    acs[3] = 0;			/* to zero */
+    JSYS(JSmtopr,acs);
+    return( nvtdes );
+}
+
+int get_fsocket(jfn)
+int jfn;
+{
+    int acs[5];
+
+    ac1 = jfn;
+    if( JSYS(JSgdsts,acs) == JSerr )
+	return( 0377777777777 );	/* +INF as local socket */
+    else
+	return( ac4 );
+} /* get_fsocket */
+
+int get_fhost(jfn)
+int jfn;
+{
+    int acs[5];
+
+    ac1 = jfn;
+    if( JSYS(JSgdsts,acs) == JSerr )
+	return( -1 );
+    else
+	return( ac3 );
+} /* get_fhost */
+
+int srvjfn() {
+    return( trytcp( "TCP:514\026#;CONNECT:PASSIVE" ) );
+} /* srvjfn */
+
+
+/** Local Modes: * */
+/** Comment Column:40 * */
+/** End: * */

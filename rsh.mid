@@ -1,0 +1,343 @@
+	Title RSH - Speak Un*x rshell protocol
+	.DecSave
+
+DBG==0
+Ifndef TCPX31,TCPX31=603436	;Connection error or connection rejected
+Ifndef TCPX19,TCPX19=603422	;TCP connection allready exists
+
+Define Error &s
+	Jrst [	Hrroi 1,[Asciz s]
+		Jrst .Error ]
+Termin
+
+Define JError &s
+	Jrst [	Hrroi 1,[Asciz s]
+		Jrst .Jerror ]
+Termin
+
+Define EJError &s
+	Erjmp [	Hrroi 1,[Asciz s]
+		Jrst .Jerror ]
+Termin
+
+x==10				;Loop var
+bp==11				;BP in to InBuf
+up==12				;BP to 4n user
+cp==13				;BP to command text
+
+p==17
+
+Stack:	Block <Stklen==20>
+String:	Block <Strlen==20>
+Me:	Block Strlen		;local user (lower case)
+InBuf:	Block Strlen		;RSCAN JCL
+Host:	Block 1			;4n host number
+Jfn:	Block 1			;Net JFN
+Prompt:	Block 1			;BP to prompt in GStr
+
+Chntab:	1,,TTYINT
+	Block 34.
+
+Levtab:	PC1 ? PC2 ? PC3
+PC1:	Block 1
+PC2:	Block 1
+PC3:	Block 1
+
+Crlf:	.BYTE 7 ? ^m ? ^j ? .BYTE
+
+S:	Jfcl
+	RESET
+
+	Movei 1,.FHSLF
+	Seto 3,
+	EPCAP
+
+	Move p,[-StkLen,,Stack-1]
+
+	Movei 1,.RSINI
+	RSCAN
+	 JError 'RSCAN failed'
+
+	Jumpe 1,.Usage
+	Movn 3,1
+	Movei 1,.PRIIN
+	Hrroi 2,InBuf
+	SIN
+	 Erjmp .Usage
+
+	Move bp,[440700,,InBuf]
+	Call SkipNs
+.Usage:  Error 'Usage: rsh host [-u 4nuser] command'
+
+	Call SkipSp
+	 Jrst .Usage
+
+IFN DBG,[
+	Move 1,bp
+	PSOUT
+	Movei 1,"/
+	PBOUT
+] ;DBG
+
+	Movei 1,.GTHSN		; translate name to number
+	Move 2,bp
+	GTHST%
+	 Erjmp [Hrroi 1,[Asciz 'Bad Host']
+		Jrst .Jerror ]
+	Move bp,2
+	Movem 3,Host
+
+	Call SkipSp
+	 Jrst .Usage
+
+	Call GetMe
+	Move cp,bp		;Save bp (might be command)
+	Hrroi up,Me		;Make 4n user be me
+	Ildb 1,bp		;Get next char
+	Jumpe 1,.Usage
+	Caie 1,"-		;'-'?
+	 Jrst go4it
+	Ildb 1,bp
+	Jumpe 1,.Usage
+	Caie 1,"u
+	 Cain 1,"U
+	  Trna
+	   Error 'Bad flag'
+	Call SkipSp
+	 Error 'No user'
+	Move up,bp		;Save user pointer
+	Call SkipNs		;Skip non-spaces
+	 Error 'No command'
+	Setz 1,
+	Idpb 1,bp		;Tie off user
+	Move cp,bp
+
+go4it:	Call DoOpen
+
+IFN DBG,[
+	Move 1,up
+	PSOUT
+	Movei 1,"/
+	PBOUT
+	Move 1,cp
+	PSOUT
+	Hrroi 1,CrLf
+	PSOUT
+] ;DBG
+
+	Call DoSend
+	HALTF
+	Jrst .-1
+
+GetMe:	GJINF
+	Move 2,1		;Get user number
+	Hrroi 1,Me
+	DIRST			;Stringify
+	 Trn
+	Move 1,[440700,,Me]
+LcLop:	Ildb 2,1		;Make lc
+	Jumpe 2,R
+	Cail 2,"A
+	 Caile 2,"Z
+	  Jrst LcLop
+	Addi 2,"a-"A
+	Dpb 2,1
+	Jrst LcLop
+R:	Ret
+
+DoOpen:	Movei x,1023.		;higest prived port
+Srclop:	Hrroi 1,String
+	Hrroi 2,[Asciz /TCP:/]
+	Setz 3,
+	SOUT
+	Movei 2,(x)
+	Movei 3,10.
+	NOUT
+	 Jfcl
+	Hrroi 2,[Asciz /#./]
+	Setz 3,
+	SOUT
+	Move 2,Host
+	Movei 3,10
+	NOUT
+	 jfcl
+	Hrroi 2,[asciz /-514;PERSIST:30;CONNECT:ACTIVE/]
+	Setz 3,
+	SOUT
+	Idpb 3,2
+
+	Movsi 1,(GJ%SHT\GJ%ACC)
+	Hrroi 2,String
+	GTJFN
+	 JError 'Could not get jfn'
+	Movem 1,Jfn
+
+	Move 2,[100000,,OF%RD+OF%WR] ;8 bit bytes
+tryopn:	OPENF
+	 Skipa 3,1		;Save error code
+	  Jrst Won
+	Move 1,Jfn
+	RLJFN
+	 trn
+	Caie 3,TCPX19		;Usual error?
+	 Cain 3,TCPX31		; or this one?
+	  Sojg x,Srclop		;  Yes, search..
+	JError 'Could not open'	;out of luck
+Won:	Ret
+
+DoSend:	Hrroi 2,[Asciz '0']	;Stderr port number
+	Call SndStr
+
+	Move 2,up		;Send 4n user
+	Call Sndstr
+
+	Hrroi 2,Me		;Send local user
+	Call Sndstr
+
+	Move 2,cp		;Send command
+	Call Sndstr
+	Call Flush
+
+GetSts:	Move 1,Jfn
+	BIN
+	 EJerror 'Could not get status byte'
+	Jumpe 2,PiIni		;AOK, start input PIs
+	Hrroi 1,[Asciz '4n Error: ']
+	ESOUT
+	Jrst OK
+
+PiIni:	Hrroi 1, [Asciz 'Open...
+'] ?	PSOUT
+
+	Movei 1,.FHSLF
+	Move 2,[Levtab,,Chntab]
+	SIR
+	EIR
+
+	Movsi 2,(Setz)		;Channel 0
+	AIC
+
+	Movsi 1,.TICTI		;input, channel 0
+	ATI
+
+	Movei 1,.PRIOU
+	RFMOD
+	Tlz 2,TT%DAM
+	SFMOD
+
+OK:	Move 1,Jfn
+	BIN
+	 Erjmp Done
+	Movei 1,.PRIOU
+	BOUT
+	Jrst OK
+
+Done:	Move 1,Jfn
+	CLOSF
+	 Jerror 'Close failed'
+	HALTF
+	Jrst .-1
+
+TTYINT:	Push P,1
+	Push P,2
+	Push P,3
+TTYLOP:	Movei 1,.PRIIN
+	SIBE
+	 Trna
+	  Jrst TTYEND
+	BIN
+	 Erjmp TTYEND
+	Cain 2,^M
+	 Jrst TTYLOP
+	Cain 2,^Z
+	 Jrst ContZ
+	Move 1, JFN
+	BOUT
+	 Erjmp TTYLOP
+	Jrst TTYLOP
+TTYEND:	Call Flush
+	Pop P,3
+	Pop P,2
+	Pop P,1
+	DEBRK
+
+ContZ:	Move 1,JFN
+	CLOSF
+	 trn
+	HRROI 1,[ASCIZ '
+EOF']
+	PSOUT
+	HALTF
+	Jrst .-1
+
+Flush:	Move 1,Jfn
+	Hrroi 2,[0]
+	Setz 3,
+	SOUTR
+	 EJError 'Flush failed'
+	Ret
+
+; Send string + nul
+; 2/ bp
+Sndstr:	Move 1,Jfn
+	Setz 3,
+	SOUT
+	 EJError 'Sndstr failed'
+	Setz 2,
+	BOUT
+	 EJError 'Sndstr failed(2)'
+	Ret
+
+IOerr:	Jerror 'I/O error'
+
+; 1/	bp to prompt
+Gstr:	Movem 1,Prompt
+Gstr2:	Move 3,Prompt
+	Move 1,3
+	PSOUT
+	Hrroi 1, String
+	Move 2, [<Strlen*5-1>\RD%CRF]
+	RDTTY
+	 ErJmp gstr2
+	Setz 2,
+	Dpb 2,1
+	Ret
+
+.Jerror:
+	ESOUT
+	Hrroi 1,[Asciz ': ']
+	PSOUT
+	Movei 1,.PRIOU
+	Hrloi 2,.FHSLF
+	Setz 3,
+	ERSTR
+	 Skipa
+	  Jfcl
+	HALTF
+	Jrst .-1
+
+.Error:	ESOUT
+	HALTF
+	Jrst .-1
+
+Skips0: Skipa bp,2
+SkipSp:	 Move 2,bp
+	Ildb 1,2
+	Jumpe 1,R
+	Caie 1," 		;Space?
+	 Cain 1,^I		; or Tab?
+	  Jrst SkipS0
+Rskp:	 Aos (p)
+	 Ret
+
+SkipN0: Skipa bp,2
+SkipNs:	 Move 2,bp
+	Ildb 1,2
+	Jumpe 1,R
+	Caie 1," 		;Space?
+	 Cain 1,^I		; or Tab?
+	  AosA (p)
+	   Jrst SkipN0
+	    Ret
+
+	End S
